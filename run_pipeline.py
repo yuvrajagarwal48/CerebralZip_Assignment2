@@ -162,11 +162,17 @@ def run_app():
     subprocess.run(cmd)
 
 
+def run_compare(output_dir: str = "results/comparative_cards"):
+    """Runs 15-sample comparative forensic evaluation and saves composite cards."""
+    from scripts.generate_comparative_cards import generate_all_15_comparative_cards
+    return generate_all_15_comparative_cards(output_dir=output_dir)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Forensic License Plate Recognition Pipeline Coordinator")
     parser.add_argument(
         "--mode",
-        choices=["image", "video", "eval", "prep", "app"],
+        choices=["image", "video", "eval", "prep", "app", "compare"],
         default="image",
         help="Pipeline execution mode (default: image)"
     )
@@ -190,6 +196,9 @@ def main():
         run_prep()
     elif args.mode == "app":
         run_app()
+    elif args.mode == "compare":
+        out = args.output or "results/comparative_cards"
+        run_compare(output_dir=out)
 
 
 if __name__ == "__main__":

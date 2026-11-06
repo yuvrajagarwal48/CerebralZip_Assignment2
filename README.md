@@ -101,6 +101,11 @@ CerebralZip_Assignment2/
 │   └── videos/                             # Sample traffic footage (.mp4)
 │
 └── results/                                # Output artifacts directory
+    ├── comparative_cards/                  # 15-sample comparative before/after cards
+    │   ├── comparative_card_01_AR13.png    # Composite: Before | Extracted | After | OCR+PSNR+SSIM
+    │   ├── ...                             # (15 composite PNG images in total)
+    │   ├── COMPARATIVE_REPORT.md           # Markdown report with PSNR & SSIM table
+    │   └── comparative_summary.json        # Quantitative summary metrics JSON
     ├── evaluation/                         # Standardized evaluation outputs
     │   ├── EVALUATION_REPORT.md            # Comprehensive Markdown benchmark report
     │   ├── evaluation_summary.json         # Master benchmark metrics JSON
@@ -184,10 +189,13 @@ python run_pipeline.py --mode video --video path/to/traffic.mp4 --limit 300
 # E. Run 3-way progressive baseline benchmark evaluation (Original GT -> Enhanced GT -> Full Pipeline)
 python run_pipeline.py --mode eval --limit 25
 
-# F. Prepare and consolidate raw dataset images and VOC annotations
+# F. Run 15-sample comparative before/after demonstration (with PSNR & SSIM)
+python run_pipeline.py --mode compare
+
+# G. Prepare and consolidate raw dataset images and VOC annotations
 python run_pipeline.py --mode prep
 
-# G. Launch Streamlit UI
+# H. Launch Streamlit UI
 python run_pipeline.py --mode app
 ```
 
@@ -195,6 +203,9 @@ python run_pipeline.py --mode app
 You can run any module directly from the terminal:
 
 ```bash
+# 15-Sample Comparative Cards: Generate before/after composite images with PSNR & SSIM
+python scripts/generate_comparative_cards.py
+
 # Data Preparation: Parse Pascal VOC annotations and generate clean manifest
 python scripts/data_prep.py
 
@@ -221,12 +232,7 @@ Open and run [`forensic_license_plate_pipeline.ipynb`](forensic_license_plate_pi
 - **2x Tesla T4 Multi-GPU Optimization**:
   - Automatically discovers multiple GPUs (`torch.cuda.device_count() >= 2`).
   - Shards evaluation samples across `cuda:0` and `cuda:1` via parallel worker pools, cutting evaluation runtime in half.
-  - Leverages FP16 mixed precision on Turing Tensor Cores (`torch.autocast`) for $2.5\times$ faster NAFNet and Real-ESRGAN inference.
-
-To regenerate the notebook from the codebase at any time:
-```bash
-python build_notebook.py
-```
+  - Leverages FP16 mixed precision on Turing Tensor Cores for NAFNet and native FP32 RRDBNet for Real-ESRGAN stability.
 
 ---
 
