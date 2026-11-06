@@ -1,0 +1,12 @@
+opencv-python>=4.8.0
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.0.0
+rapidocr-onnxruntime>=1.2.0
+scikit-image>=0.21.0
+huggingface-hub>=0.16.0
+matplotlib>=3.7.0
+numpy>=1.24.0
+scipy>=1.10.0
+onnxruntime
+streamlit>=1.24.0
