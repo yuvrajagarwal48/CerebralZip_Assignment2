@@ -594,13 +594,21 @@ def display_final_vehicle_ocr_summary(
         # -------------------------------------------------------------
         plate_crop = None
         cand_variants = vis.get("candidate_variants", {})
-        if winning_variant in cand_variants:
+        if winning_variant in cand_variants and getattr(cand_variants[winning_variant], "size", 0) > 0:
             plate_crop = cand_variants[winning_variant]
-        elif "rectified_plate" in vis:
-            plate_crop = vis["rectified_plate"]
-        elif bbox is not None:
+        elif vis.get("display_crop") is not None and getattr(vis.get("display_crop"), "size", 0) > 0:
+            plate_crop = vis["display_crop"]
+        elif vis.get("rectified_crop") is not None and getattr(vis.get("rectified_crop"), "size", 0) > 0:
+            plate_crop = vis["rectified_crop"]
+        elif vis.get("raw_crop") is not None and getattr(vis.get("raw_crop"), "size", 0) > 0:
+            plate_crop = vis["raw_crop"]
+        elif bbox is not None and v.get("car_img") is not None:
             x1, y1, x2, y2 = bbox
-            plate_crop = v["car_img"][y1:y2, x1:x2]
+            ch, cw = v["car_img"].shape[:2]
+            x1, y1 = max(0, int(x1)), max(0, int(y1))
+            x2, y2 = min(cw, int(x2)), min(ch, int(y2))
+            if x2 > x1 and y2 > y1:
+                plate_crop = v["car_img"][y1:y2, x1:x2]
 
         if plate_crop is not None and plate_crop.size > 0:
             plate_rgb = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2RGB)
@@ -655,6 +663,8 @@ def display_final_vehicle_ocr_summary(
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2
             )
         cv2.imwrite(save_path, out_bgr)
+        v["annotated_car_path"] = save_path
+        v["annotated_car_img"] = out_bgr
 
     # Save master JSON metadata
     json_path = os.path.join(output_dir, "verified_vehicles_summary.json")
