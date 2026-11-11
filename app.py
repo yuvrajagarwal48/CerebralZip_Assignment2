@@ -13,6 +13,7 @@ values without extraneous technical evaluation metrics.
 
 import os
 import tempfile
+from pathlib import Path
 import cv2
 import numpy as np
 import torch
@@ -103,7 +104,11 @@ def load_video_pipeline():
 # Sidebar
 # =========================================================================
 st.sidebar.title("⚙️ Configuration")
-mode = st.sidebar.radio("Select Processing Mode", ["📷 Photo / Image", "🎥 Video (Traffic Footage)"])
+mode = st.sidebar.selectbox(
+    "Select Processing Mode",
+    ["📷 Photo / Image", "🎥 Video (Traffic Footage)"],
+    index=0
+)
 
 # Hardware info
 num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
@@ -146,19 +151,36 @@ if mode == "📷 Photo / Image":
     input_bgr = None
     input_filename = "Sample"
 
-    demo_path = "data/dataset_prepared/images/AN1.jpg"
-    if not os.path.exists(demo_path):
-        cands = list(Path("data/dataset_prepared/images").glob("*.jpg"))
-        if cands:
-            demo_path = str(cands[0])
+    demo_path = None
+    default_candidates = [
+        "data/dataset_prepared/images/AN1.jpg",
+        "data/dataset_prepared/images/AR13.jpg",
+        "data/dataset_prepared/images/AN2.jpg"
+    ]
+    for cand in default_candidates:
+        if os.path.exists(cand):
+            demo_path = cand
+            break
+
+    if demo_path is None:
+        search_dirs = ["data/dataset_prepared/images", "data/images"]
+        for sdir in search_dirs:
+            if os.path.isdir(sdir):
+                cands = list(Path(sdir).glob("*.jpg")) + list(Path(sdir).glob("*.png"))
+                if cands:
+                    demo_path = str(cands[0])
+                    break
 
     if uploaded_image is not None:
         file_bytes = np.asarray(bytearray(uploaded_image.read()), dtype=np.uint8)
         input_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
         input_filename = uploaded_image.name
-    elif use_demo_image and os.path.exists(demo_path):
-        input_bgr = cv2.imread(demo_path)
-        input_filename = Path(demo_path).name
+    elif use_demo_image:
+        if demo_path and os.path.exists(demo_path):
+            input_bgr = cv2.imread(demo_path)
+            input_filename = Path(demo_path).name
+        else:
+            st.warning("⚠️ No sample demo image found on disk. Please upload an image file.")
 
     if input_bgr is not None:
         st.markdown("---")
@@ -193,14 +215,14 @@ if mode == "📷 Photo / Image":
 
                 with c1:
                     st.markdown("#### 1. Extracted Plate")
-                    if raw_crop is not None and raw_crop.size > 0:
+                    if raw_crop is not None and getattr(raw_crop, "size", 0) > 0:
                         st.image(cv2.cvtColor(raw_crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                     else:
                         st.warning("Extracted crop unavailable")
 
                 with c2:
                     st.markdown("#### 2. Enhanced Plate")
-                    if enhanced_crop is not None and enhanced_crop.size > 0:
+                    if enhanced_crop is not None and getattr(enhanced_crop, "size", 0) > 0:
                         st.image(cv2.cvtColor(enhanced_crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                     else:
                         st.warning("Enhanced crop unavailable")
@@ -251,18 +273,26 @@ elif mode == "🎥 Video (Traffic Footage)":
             st.caption("⚡ **Full Video Mode:** The pipeline will process all frames until the video terminates.")
 
     video_source_path = None
-    demo_video_path = "data/videos/Automatic Number Plate Recognition (ANPR) _ Vehicle Number Plate Recognition (1).mp4"
-    if not os.path.exists(demo_video_path):
-        cands = list(Path("data/videos").glob("*.mp4"))
+    demo_video_path = None
+    default_vid = "data/videos/Automatic Number Plate Recognition (ANPR) _ Vehicle Number Plate Recognition (1).mp4"
+    if os.path.exists(default_vid):
+        demo_video_path = default_vid
+    elif os.path.isdir("data/videos"):
+        cands = list(Path("data/videos").glob("*.mp4")) + list(Path("data/videos").glob("*.avi"))
         if cands:
             demo_video_path = str(cands[0])
 
     if uploaded_video is not None:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         tfile.write(uploaded_video.read())
+        tfile.flush()
+        tfile.close()
         video_source_path = tfile.name
-    elif use_demo_video and os.path.exists(demo_video_path):
-        video_source_path = demo_video_path
+    elif use_demo_video:
+        if demo_video_path and os.path.exists(demo_video_path):
+            video_source_path = demo_video_path
+        else:
+            st.warning("⚠️ No sample demo video found on disk. Please upload a video file.")
 
     if video_source_path is not None:
         st.markdown("---")
@@ -322,21 +352,21 @@ elif mode == "🎥 Video (Traffic Footage)":
 
                         with c_car:
                             st.caption("🚗 1. Extracted Vehicle")
-                            if car_disp is not None and car_disp.size > 0:
+                            if car_disp is not None and getattr(car_disp, "size", 0) > 0:
                                 st.image(cv2.cvtColor(car_disp, cv2.COLOR_BGR2RGB), use_container_width=True)
                             else:
                                 st.warning("Vehicle image unavailable")
 
                         with c_plate:
                             st.caption("🔍 2. Extracted Plate")
-                            if raw_crop is not None and raw_crop.size > 0:
+                            if raw_crop is not None and getattr(raw_crop, "size", 0) > 0:
                                 st.image(cv2.cvtColor(raw_crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                             else:
                                 st.warning("Extracted crop unavailable")
 
                         with c_enh:
                             st.caption("✨ 3. Enhanced Plate")
-                            if enhanced_crop is not None and enhanced_crop.size > 0:
+                            if enhanced_crop is not None and getattr(enhanced_crop, "size", 0) > 0:
                                 st.image(cv2.cvtColor(enhanced_crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                             else:
                                 st.warning("Enhanced crop unavailable")

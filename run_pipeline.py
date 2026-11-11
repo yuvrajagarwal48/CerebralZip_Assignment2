@@ -158,7 +158,12 @@ def run_prep():
 def run_app():
     """Launches Streamlit dashboard."""
     print("[*] Launching Streamlit Forensic Application...")
-    cmd = [sys.executable, "-m", "streamlit", "run", "app.py"]
+    cmd = [
+        sys.executable, "-m", "streamlit", "run", "app.py",
+        "--server.headless=true",
+        "--server.enableCORS=false",
+        "--server.enableXsrfProtection=false"
+    ]
     subprocess.run(cmd)
 
 
@@ -168,11 +173,17 @@ def run_compare(output_dir: str = "results/comparative_cards"):
     return generate_all_15_comparative_cards(output_dir=output_dir)
 
 
+def run_steps(output_dir: str = "results/step_by_step_visualizations"):
+    """Runs 15-sample granular step-by-step pipeline progression and saves 8-panel cards."""
+    from scripts.generate_step_progression_cards import generate_all_step_progression_cards
+    return generate_all_step_progression_cards(output_dir=output_dir)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Forensic License Plate Recognition Pipeline Coordinator")
     parser.add_argument(
         "--mode",
-        choices=["image", "video", "eval", "prep", "app", "compare"],
+        choices=["image", "video", "eval", "prep", "app", "compare", "steps"],
         default="image",
         help="Pipeline execution mode (default: image)"
     )
@@ -199,6 +210,9 @@ def main():
     elif args.mode == "compare":
         out = args.output or "results/comparative_cards"
         run_compare(output_dir=out)
+    elif args.mode == "steps":
+        out = args.output or "results/step_by_step_visualizations"
+        run_steps(output_dir=out)
 
 
 if __name__ == "__main__":

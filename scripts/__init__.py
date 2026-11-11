@@ -39,6 +39,7 @@ from scripts.video_pipeline import (
 from scripts.data_prep import prepare_unified_dataset
 from scripts.evaluation import ForensicPipelineEvaluator, DetectionEvaluator, BaselineComparisonEngine, OCREvaluator
 from scripts.generate_comparative_cards import generate_all_15_comparative_cards
+from scripts.generate_step_progression_cards import generate_all_step_progression_cards
 
 __all__ = [
     "AutonomousPlateDetector",

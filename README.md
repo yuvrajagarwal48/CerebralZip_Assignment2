@@ -106,6 +106,11 @@ CerebralZip_Assignment2/
     │   ├── ...                             # (15 composite PNG images in total)
     │   ├── COMPARATIVE_REPORT.md           # Markdown report with PSNR & SSIM table
     │   └── comparative_summary.json        # Quantitative summary metrics JSON
+    ├── step_by_step_visualizations/        # 15-sample granular 8-stage pipeline progression cards
+    │   ├── step_progression_01_AR13.png    # 8-panel progression: Original -> NAFNet -> Crop -> ... -> Final
+    │   ├── ...                             # (15 progression PNG images in total)
+    │   ├── STEP_BY_STEP_REPORT.md          # Granular step-by-step progression report
+    │   └── step_progression_summary.json   # Quantitative intermediate stage summary
     ├── evaluation/                         # Standardized evaluation outputs
     │   ├── EVALUATION_REPORT.md            # Comprehensive Markdown benchmark report
     │   ├── evaluation_summary.json         # Master benchmark metrics JSON
@@ -159,11 +164,27 @@ The interactive web dashboard allows users to upload vehicle photos or traffic v
 
 ### How to Run the App:
 ```bash
+# Local Machine:
 streamlit run app.py
-```
-Or via the pipeline runner:
-```bash
+# Or via pipeline runner:
 python run_pipeline.py --mode app
+```
+
+#### Running on Kaggle / Google Colab:
+When running on Kaggle or Colab notebooks, configure the reverse tunnel using Cloudflare (zero setup, no passwords or interstitial blockers):
+```bash
+# 1. Start Streamlit in background
+!streamlit run app.py &
+
+# 2. Expose via Cloudflare Tunnel (Recommended)
+!wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared && chmod +x cloudflared
+!./cloudflared tunnel --url http://localhost:8501 &
+# The output will provide a direct https://*.trycloudflare.com URL with full WebSocket and chunk loading support.
+
+# Alternatively via Localtunnel:
+# !curl -s ipv4.icanhazip.com   # Copy this public IP
+# !npx localtunnel --port 8501
+# (Submit the IP once on the loca.lt landing page to authorize static script chunk fetches)
 ```
 
 ---
@@ -192,10 +213,13 @@ python run_pipeline.py --mode eval --limit 25
 # F. Run 15-sample comparative before/after demonstration (with PSNR & SSIM)
 python run_pipeline.py --mode compare
 
-# G. Prepare and consolidate raw dataset images and VOC annotations
+# G. Run 15-sample 8-stage step-by-step pipeline progression cards
+python run_pipeline.py --mode steps
+
+# H. Prepare and consolidate raw dataset images and VOC annotations
 python run_pipeline.py --mode prep
 
-# H. Launch Streamlit UI
+# I. Launch Streamlit UI
 python run_pipeline.py --mode app
 ```
 
@@ -205,6 +229,9 @@ You can run any module directly from the terminal:
 ```bash
 # 15-Sample Comparative Cards: Generate before/after composite images with PSNR & SSIM
 python scripts/generate_comparative_cards.py
+
+# 15-Sample Step Progression Cards: Generate 8-stage progression cards
+python scripts/generate_step_progression_cards.py
 
 # Data Preparation: Parse Pascal VOC annotations and generate clean manifest
 python scripts/data_prep.py

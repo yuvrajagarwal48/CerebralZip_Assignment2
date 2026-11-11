@@ -181,53 +181,72 @@ class DeblurringModule:
             self.model.eval()
             print("[✓] [DeblurringModule] NAFNet model loaded.")
 
-    def deblur(self, full_bgr: np.ndarray, max_dim: int = 1024) -> np.ndarray:
+    def deblur(self, full_bgr: np.ndarray, min_dim: int = 512, max_dim: int = 1024) -> np.ndarray:
         """
-        Executes learned motion deblurring on a BGR image with memory protection:
-        - Downscales high-resolution scenes (max(H, W) > max_dim) to avoid catastrophic out-of-memory.
-        - Scales restored output back to original dimensions preserving aspect ratio and scale.
-        - Catches out-of-memory / allocation errors and falls back safely to original image.
+        Executes learned motion deblurring on a BGR image with domain-safe scaling and FP32 stability:
+        - Prevents FP16 numerical overflow by running strictly in single-precision (FP32).
+        - Upscales small images (min(H, W) < min_dim) to avoid bottleneck receptive field collapse.
+        - Downscales high-resolution scenes (max(H, W) > max_dim) to protect GPU memory.
+        - Aligns dimensions smoothly to multiples of 16, avoiding reflect-padding boundary wave blowup.
+        - Detects divergence / NaNs and falls back safely to the original image.
         """
         if full_bgr is None or full_bgr.size == 0:
             return full_bgr
 
         orig_h, orig_w = full_bgr.shape[:2]
 
-        needs_downscale = max(orig_h, orig_w) > max_dim
-        if needs_downscale:
-            scale = max_dim / float(max(orig_h, orig_w))
-            target_w = max(16, int(orig_w * scale))
-            target_h = max(16, int(orig_h * scale))
-            pad_size = getattr(self.model, "padder_size", 16)
-            target_w = ((target_w + pad_size - 1) // pad_size) * pad_size
-            target_h = ((target_h + pad_size - 1) // pad_size) * pad_size
-            input_scaled = cv2.resize(full_bgr, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        # Calculate domain-safe scaling factors
+        scale = 1.0
+        min_curr = min(orig_h, orig_w)
+        max_curr = max(orig_h, orig_w)
+
+        if min_curr < min_dim:
+            scale = float(min_dim) / float(min_curr)
+        if max_curr * scale > max_dim:
+            scale = float(max_dim) / float(max_curr)
+
+        target_w = max(16, int(round(orig_w * scale)))
+        target_h = max(16, int(round(orig_h * scale)))
+        pad_size = getattr(self.model, "padder_size", 16)
+        target_w = ((target_w + pad_size - 1) // pad_size) * pad_size
+        target_h = ((target_h + pad_size - 1) // pad_size) * pad_size
+
+        needs_resize = (target_w != orig_w or target_h != orig_h)
+        if needs_resize:
+            input_scaled = cv2.resize(full_bgr, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
         else:
             input_scaled = full_bgr
 
         try:
             img_rgb = cv2.cvtColor(input_scaled, cv2.COLOR_BGR2RGB)
             img_f = img_rgb.astype(np.float32) / 255.0
-            tensor = torch.from_numpy(img_f).permute(2, 0, 1).unsqueeze(0).to(self.device)
+            tensor = torch.from_numpy(img_f).permute(2, 0, 1).unsqueeze(0).to(self.device).float()
 
-            use_amp = (self.device.type == "cuda")
             with torch.inference_mode():
-                if use_amp:
-                    with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        out = self.model(tensor)
-                else:
-                    out = self.model(tensor)
+                # Strictly FP32 execution to prevent activation overflow in NAFNet's 28 deep residual blocks
+                out = self.model(tensor)
 
-            out_np = out.squeeze(0).permute(1, 2, 0).cpu().clamp(0.0, 1.0).numpy()
+            # Divergence & NaN guard
+            if torch.isnan(out).any() or out.min() < -3.0 or out.max() > 4.0:
+                print(f"[!] [DeblurringModule] Divergence detected (min={out.min().item():.2f}, max={out.max().item():.2f}). Safely falling back to original image.")
+                return full_bgr
+
+            out_clamped = torch.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            out_np = out_clamped.squeeze(0).permute(1, 2, 0).cpu().numpy()
             restored_rgb = (out_np * 255.0).round().astype(np.uint8)
             restored_bgr = cv2.cvtColor(restored_rgb, cv2.COLOR_RGB2BGR)
 
-            if needs_downscale:
-                return cv2.resize(restored_bgr, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
+            # Extra sanity check: verify restored image is not pure black or corrupt
+            if restored_bgr.mean() < 3.0 and full_bgr.mean() >= 5.0:
+                print("[!] [DeblurringModule] Deblurred output near black; falling back to original frame.")
+                return full_bgr
+
+            if needs_resize:
+                return cv2.resize(restored_bgr, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
             return restored_bgr
 
         except (RuntimeError, MemoryError) as e:
-            print(f"[!] [DeblurringModule] Memory limit exceeded ({e}). Falling back safely to input frame.")
+            print(f"[!] [DeblurringModule] Execution exception ({e}). Falling back safely to input frame.")
             if self.device.type == "cuda":
                 torch.cuda.empty_cache()
             return full_bgr
@@ -238,35 +257,52 @@ def load_official_nafnet(device: torch.device) -> NAFNet:
     return module.model
 
 
-def deblur_full_image_nafnet(model: nn.Module, device: torch.device, full_bgr: np.ndarray, max_dim: int = 1024) -> np.ndarray:
+def deblur_full_image_nafnet(model: nn.Module, device: torch.device, full_bgr: np.ndarray, min_dim: int = 512, max_dim: int = 1024) -> np.ndarray:
     if full_bgr is None or full_bgr.size == 0:
         return full_bgr
 
     orig_h, orig_w = full_bgr.shape[:2]
-    needs_downscale = max(orig_h, orig_w) > max_dim
+    scale = 1.0
+    min_curr = min(orig_h, orig_w)
+    max_curr = max(orig_h, orig_w)
 
-    if needs_downscale:
-        scale = max_dim / float(max(orig_h, orig_w))
-        target_w = max(16, int(orig_w * scale))
-        target_h = max(16, int(orig_h * scale))
-        pad_size = getattr(model, "padder_size", 16)
-        target_w = ((target_w + pad_size - 1) // pad_size) * pad_size
-        target_h = ((target_h + pad_size - 1) // pad_size) * pad_size
-        input_scaled = cv2.resize(full_bgr, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    if min_curr < min_dim:
+        scale = float(min_dim) / float(min_curr)
+    if max_curr * scale > max_dim:
+        scale = float(max_dim) / float(max_curr)
+
+    target_w = max(16, int(round(orig_w * scale)))
+    target_h = max(16, int(round(orig_h * scale)))
+    pad_size = getattr(model, "padder_size", 16)
+    target_w = ((target_w + pad_size - 1) // pad_size) * pad_size
+    target_h = ((target_h + pad_size - 1) // pad_size) * pad_size
+
+    needs_resize = (target_w != orig_w or target_h != orig_h)
+    if needs_resize:
+        input_scaled = cv2.resize(full_bgr, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
     else:
         input_scaled = full_bgr
 
     try:
         img_rgb = cv2.cvtColor(input_scaled, cv2.COLOR_BGR2RGB)
         img_f = img_rgb.astype(np.float32) / 255.0
-        tensor = torch.from_numpy(img_f).permute(2, 0, 1).unsqueeze(0).to(device)
-        with torch.no_grad():
+        tensor = torch.from_numpy(img_f).permute(2, 0, 1).unsqueeze(0).to(device).float()
+        with torch.inference_mode():
             out = model(tensor)
-        out_np = out.squeeze(0).permute(1, 2, 0).cpu().clamp(0.0, 1.0).numpy()
+
+        if torch.isnan(out).any() or out.min() < -3.0 or out.max() > 4.0:
+            return full_bgr
+
+        out_clamped = torch.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        out_np = out_clamped.squeeze(0).permute(1, 2, 0).cpu().numpy()
         restored_rgb = (out_np * 255.0).round().astype(np.uint8)
         restored_bgr = cv2.cvtColor(restored_rgb, cv2.COLOR_RGB2BGR)
-        if needs_downscale:
-            return cv2.resize(restored_bgr, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
+
+        if restored_bgr.mean() < 3.0 and full_bgr.mean() >= 5.0:
+            return full_bgr
+
+        if needs_resize:
+            return cv2.resize(restored_bgr, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
         return restored_bgr
     except (RuntimeError, MemoryError) as e:
         print(f"[!] [DeblurringModule] Memory limit exceeded ({e}). Returning original image.")

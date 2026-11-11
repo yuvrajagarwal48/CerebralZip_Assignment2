@@ -30,8 +30,8 @@ class PlateGeometryModule:
     def extract_padded_roi(
         img_bgr: np.ndarray,
         box: List[int],
-        pad_pct_w: float = 0.03,
-        pad_pct_h: float = 0.04
+        pad_pct_w: float = 0.06,
+        pad_pct_h: float = 0.08
     ) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
         """
         Applies proportional safety margins around detected bounding box
@@ -50,25 +50,144 @@ class PlateGeometryModule:
     def order_quad_points_robust(pts: np.ndarray) -> np.ndarray:
         """
         Rigorously orders 4 quadrilateral points into [top-left, top-right, bottom-right, bottom-left].
+        Rotation-invariant algorithm that does not rely on sums/differences (x+y or y-x):
+          1. Computes the centroid and sorts points cyclically (clockwise) by polar angle.
+          2. Compares the two opposite edge pairs to identify the long (horizontal) edges vs short (vertical) edges.
+          3. Distinguishes the top edge (smaller average y) from the bottom edge (larger average y).
+          4. Orders vertices left-to-right along top edge (tl, tr) and bottom edge (bl, br).
         """
         pts = pts.reshape(4, 2).astype("float32")
-        center = np.mean(pts, axis=0)
-        angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
+        c = np.mean(pts, axis=0)
+        angles = np.arctan2(pts[:, 1] - c[1], pts[:, 0] - c[0])
         pts_sorted = pts[np.argsort(angles)]
-        tl_idx = np.argmin(np.sum(pts_sorted, axis=1))
-        return np.roll(pts_sorted, -tl_idx, axis=0)
+
+        p0, p1, p2, p3 = pts_sorted
+        e0_len = float(np.linalg.norm(p1 - p0))
+        e1_len = float(np.linalg.norm(p2 - p1))
+        e2_len = float(np.linalg.norm(p3 - p2))
+        e3_len = float(np.linalg.norm(p0 - p3))
+
+        # Plates are wider than they are tall: identify the pair of longer edges
+        if (e0_len + e2_len) >= (e1_len + e3_len):
+            pairA, pairB = (p0, p1), (p3, p2)
+        else:
+            pairA, pairB = (p1, p2), (p0, p3)
+
+        yA = (pairA[0][1] + pairA[1][1]) / 2.0
+        yB = (pairB[0][1] + pairB[1][1]) / 2.0
+        top_pair, bot_pair = (pairA, pairB) if yA <= yB else (pairB, pairA)
+
+        tl = top_pair[0] if top_pair[0][0] <= top_pair[1][0] else top_pair[1]
+        tr = top_pair[1] if top_pair[0][0] <= top_pair[1][0] else top_pair[0]
+
+        bl = bot_pair[0] if bot_pair[0][0] <= bot_pair[1][0] else bot_pair[1]
+        br = bot_pair[1] if bot_pair[0][0] <= bot_pair[1][0] else bot_pair[0]
+
+        return np.array([tl, tr, br, bl], dtype=np.float32)
+
+    @staticmethod
+    def _evaluate_quad_candidate(
+        approx: np.ndarray,
+        crop_shape: Tuple[int, int]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Scores an eligible 4-point contour based on:
+        1. Contour Area & Proportion of the crop occupied
+        2. Convexity & Solidity
+        3. Four-corner approximation (orthogonality of corner angles)
+        4. Aspect Ratio (measured naturally from the 4 corners)
+        5. Parallel edge symmetry
+        """
+        h_crop, w_crop = crop_shape[:2]
+        area_crop = float(h_crop * w_crop)
+        area = float(cv2.contourArea(approx))
+
+        # Filter out tiny noise contours or outer image boundaries
+        if area < 0.15 * area_crop or area > 0.98 * area_crop:
+            return None
+        if not cv2.isContourConvex(approx):
+            return None
+
+        pts = PlateGeometryModule.order_quad_points_robust(approx)
+        tl, tr, br, bl = pts
+
+        width_top = float(np.linalg.norm(tr - tl))
+        width_bot = float(np.linalg.norm(br - bl))
+        height_r = float(np.linalg.norm(tr - br))
+        height_l = float(np.linalg.norm(tl - bl))
+
+        max_w = max(width_top, width_bot)
+        max_h = max(height_r, height_l)
+        mean_w = (width_top + width_bot) / 2.0
+        mean_h = (height_r + height_l) / 2.0
+
+        if mean_h < 4.0 or mean_w < 15.0:
+            return None
+
+        # Natural aspect ratio from four corners
+        ar = mean_w / max(1e-4, mean_h)
+        if ar < 1.4 or ar > 6.5:
+            return None
+
+        # 1. Occupancy proportion (target 40% - 90%)
+        occupancy = area / area_crop
+        s_occ = max(0.0, 1.0 - abs(occupancy - 0.70) / 0.35)
+
+        # 2. Convexity & Solidity
+        hull = cv2.convexHull(approx)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / max(1e-4, hull_area)
+        s_sol = min(1.0, solidity)
+
+        # 3. Corner angle orthogonality (angles near 90 degrees)
+        cos_angles = []
+        for i in range(4):
+            p_prev = pts[(i - 1) % 4]
+            p_curr = pts[i]
+            p_next = pts[(i + 1) % 4]
+            v1 = p_prev - p_curr
+            v2 = p_next - p_curr
+            norm1 = float(np.linalg.norm(v1))
+            norm2 = float(np.linalg.norm(v2))
+            if norm1 > 1e-4 and norm2 > 1e-4:
+                cos_angles.append(abs(float(np.dot(v1, v2) / (norm1 * norm2))))
+            else:
+                cos_angles.append(1.0)
+        s_angle = max(0.0, 1.0 - float(np.mean(cos_angles)))
+
+        # 4. Aspect ratio score (rewards standard plates ~ 2.0 to 5.0)
+        s_ar = max(0.0, 1.0 - abs(ar - 3.7) / 2.2)
+
+        # 5. Parallel edge symmetry
+        s_sym = max(0.0, 1.0 - (abs(width_top - width_bot) + abs(height_l - height_r)) / (mean_w + mean_h))
+
+        total_score = 0.25 * s_occ + 0.20 * s_sol + 0.25 * s_angle + 0.15 * s_ar + 0.15 * s_sym
+        return {
+            "score": total_score,
+            "ordered_pts": pts,
+            "target_w": int(round(max_w)),
+            "target_h": int(round(max_h)),
+            "mean_w": mean_w,
+            "mean_h": mean_h,
+            "aspect_ratio": ar,
+            "occupancy": occupancy
+        }
 
     def rectify(self, crop_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Tuple[int, int], str]:
         """
         Performs 4-point perspective rectification or Hough line deskewing.
-        Measures the actual plate quadrilateral before rectification and records dimensions.
+        Ranks all eligible candidate contours using area, convexity, corner orthogonality,
+        aspect ratio, and occupancy.
+        Calculates output dimensions directly from the 4 corners, preserving natural aspect ratio.
         Returns:
             Tuple of (rectified_crop, transform_matrix_3x3, (target_w, target_h), status_string)
         """
+        if crop_bgr is None or crop_bgr.size == 0:
+            return crop_bgr, np.eye(3, dtype=np.float32), (0, 0), "EMPTY_CROP"
+
         h, w = crop_bgr.shape[:2]
         gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blurred, 30, 130)
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
 
         # Default fallback quadrilateral dimensions
         self.last_quad_dims = {
@@ -80,65 +199,90 @@ class PlateGeometryModule:
             "method": "RAW_CROP_BOUNDS"
         }
 
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:6]
+        # Multi-modal edge and binarization representations for robust boundary discovery
+        edge_maps = [
+            cv2.Canny(blurred, 30, 120),
+            cv2.Canny(blurred, 50, 150)
+        ]
+        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        edge_maps.append(otsu)
+        edge_maps.append(cv2.bitwise_not(otsu))
 
-        # Path A: Quadrilateral Homography Rectification
-        for c in contours:
-            peri = cv2.arcLength(c, True)
-            approx = cv2.approxPolyDP(c, 0.035 * peri, True)
-            area = cv2.contourArea(approx)
+        candidates: List[Dict[str, Any]] = []
 
-            if len(approx) == 4 and cv2.isContourConvex(approx) and area > (0.15 * h * w):
-                ordered_pts = self.order_quad_points_robust(approx)
-                (tl, tr, br, bl) = ordered_pts
+        for em in edge_maps:
+            cnts, _ = cv2.findContours(em, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+            for c in cnts:
+                peri = cv2.arcLength(c, True)
+                if peri < 15:
+                    continue
+                # 1. Sweep adaptive epsilon factors for 4-corner approximation
+                for eps_pct in [0.015, 0.025, 0.035, 0.05, 0.07]:
+                    approx = cv2.approxPolyDP(c, eps_pct * peri, True)
+                    if len(approx) == 4:
+                        res = self._evaluate_quad_candidate(approx, crop_bgr.shape)
+                        if res and res["score"] >= 0.40:
+                            candidates.append(res)
 
-                width_top = np.linalg.norm(tr - tl)
-                width_bottom = np.linalg.norm(br - bl)
-                max_w = int(max(width_top, width_bottom))
+                # 2. Minimum Area Oriented Bounding Quadrilateral
+                rect = cv2.minAreaRect(c)
+                box_pts = cv2.boxPoints(rect).astype(np.int32)
+                res = self._evaluate_quad_candidate(box_pts, crop_bgr.shape)
+                if res and res["score"] >= 0.40:
+                    candidates.append(res)
 
-                height_right = np.linalg.norm(tr - br)
-                height_left = np.linalg.norm(tl - bl)
-                max_h = int(max(height_right, height_left))
+        # Rank all eligible contours by composite score (highest first)
+        candidates.sort(key=lambda x: x["score"], reverse=True)
 
-                aspect_ratio = max_w / max(1e-5, max_h)
-                if 1.8 <= aspect_ratio <= 6.5 and max_w >= 45 and max_h >= 16:
-                    target_h = 96
-                    target_w = int(target_h * aspect_ratio)
+        if candidates:
+            best = candidates[0]
+            ordered_pts = best["ordered_pts"]
+            ar = best["aspect_ratio"]
 
-                    # Record physical pre-rectification quadrilateral dimensions
-                    mean_quad_h = float((height_left + height_right) / 2.0)
-                    mean_quad_w = float((width_top + width_bottom) / 2.0)
-                    self.last_quad_dims = {
-                        "quad_h": mean_quad_h,
-                        "quad_w": mean_quad_w,
-                        "max_h": float(max_h),
-                        "max_w": float(max_w),
-                        "aspect_ratio": float(aspect_ratio),
-                        "ordered_pts": ordered_pts,
-                        "method": "MEASURED_QUADRILATERAL"
-                    }
+            # Calculate natural dimensions directly from the 4 corners
+            tw = max(16, best["target_w"])
+            th = max(16, best["target_h"])
 
-                    dst_pts = np.array([
-                        [0, 0],
-                        [target_w - 1, 0],
-                        [target_w - 1, target_h - 1],
-                        [0, target_h - 1]
-                    ], dtype="float32")
+            # Resolution scaling: if quadrilateral is low-res, scale both dimensions
+            # proportionally to guarantee sufficient pixel density for OCR,
+            # strictly preserving the corner-derived physical aspect ratio (no fixed 4:1 stretch)
+            if th < 32:
+                scale = 48.0 / float(th)
+                tw = int(round(tw * scale))
+                th = int(round(th * scale))
 
-                    H = cv2.getPerspectiveTransform(ordered_pts, dst_pts)
-                    det = np.linalg.det(H)
-                    if 1e-4 < abs(det) < 1e4:
-                        warped = cv2.warpPerspective(
-                            crop_bgr, H, (target_w, target_h),
-                            flags=cv2.INTER_LANCZOS4,
-                            borderMode=cv2.BORDER_CONSTANT,
-                            borderValue=[255, 255, 255]
-                        )
-                        self.last_residual_skew = 0.0
-                        return warped, H, (target_w, target_h), "HOMOGRAPHY_WARP"
+            self.last_quad_dims = {
+                "quad_h": float(best["mean_h"]),
+                "quad_w": float(best["mean_w"]),
+                "max_h": float(best["target_h"]),
+                "max_w": float(best["target_w"]),
+                "aspect_ratio": float(ar),
+                "ordered_pts": ordered_pts,
+                "score": float(best["score"]),
+                "method": "RANKED_QUADRILATERAL"
+            }
 
-        # Path B: Hough Deskewing
+            dst_pts = np.array([
+                [0, 0],
+                [tw - 1, 0],
+                [tw - 1, th - 1],
+                [0, th - 1]
+            ], dtype=np.float32)
+
+            H = cv2.getPerspectiveTransform(ordered_pts, dst_pts)
+            det = np.linalg.det(H)
+            if 1e-4 < abs(det) < 1e4:
+                warped = cv2.warpPerspective(
+                    crop_bgr, H, (tw, th),
+                    flags=cv2.INTER_LANCZOS4,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=[255, 255, 255]
+                )
+                self.last_residual_skew = 0.0
+                return warped, H, (tw, th), f"HOMOGRAPHY_WARP(score={best['score']:.2f}, AR={ar:.2f})"
+
+        # Path B: Hough Deskewing fallback
+        edges = cv2.Canny(blurred, 30, 130)
         lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=int(min(h, w) * 0.55))
         angles = []
         if lines is not None:
@@ -166,7 +310,7 @@ class PlateGeometryModule:
         else:
             self.last_residual_skew = 0.0
 
-        # Path C: Original Preserved
+        # Path C: Original Preserved safely without distortion
         return crop_bgr, np.eye(3, dtype=np.float32), (w, h), "ORIGINAL_PRESERVED"
 
     @staticmethod
