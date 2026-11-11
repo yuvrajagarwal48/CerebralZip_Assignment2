@@ -179,11 +179,17 @@ def run_steps(output_dir: str = "results/step_by_step_visualizations"):
     return generate_all_step_progression_cards(output_dir=output_dir)
 
 
+def run_tunnel():
+    """Launches Streamlit app exposed via Cloudflare Tunnel for Kaggle / Colab."""
+    from scripts.launch_tunnel import main as launch_tunnel_main
+    launch_tunnel_main()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Forensic License Plate Recognition Pipeline Coordinator")
     parser.add_argument(
         "--mode",
-        choices=["image", "video", "eval", "prep", "app", "compare", "steps"],
+        choices=["image", "video", "eval", "prep", "app", "compare", "steps", "tunnel"],
         default="image",
         help="Pipeline execution mode (default: image)"
     )
@@ -213,6 +219,8 @@ def main():
     elif args.mode == "steps":
         out = args.output or "results/step_by_step_visualizations"
         run_steps(output_dir=out)
+    elif args.mode == "tunnel":
+        run_tunnel()
 
 
 if __name__ == "__main__":

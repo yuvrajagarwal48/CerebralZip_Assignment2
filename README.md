@@ -171,20 +171,21 @@ python run_pipeline.py --mode app
 ```
 
 #### Running on Kaggle / Google Colab:
-When running on Kaggle or Colab notebooks, configure the reverse tunnel using Cloudflare (zero setup, no passwords or interstitial blockers):
+When running on Kaggle or Colab notebooks, launch Streamlit with Cloudflare Tunnel (zero setup, no passwords or interstitial blockers):
 ```bash
-# 1. Start Streamlit in background
-!streamlit run app.py &
+# Option 1: Automatic 1-command launcher (Recommended)
+!python run_pipeline.py --mode tunnel
 
-# 2. Expose via Cloudflare Tunnel (Recommended)
+# Option 2: Manual commands
+!streamlit run app.py &
 !wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared && chmod +x cloudflared
 !./cloudflared tunnel --url http://localhost:8501 &
-# The output will provide a direct https://*.trycloudflare.com URL with full WebSocket and chunk loading support.
+# The output will provide a direct https://*.trycloudflare.com URL with full WebSocket and dynamic chunk loading support.
 
-# Alternatively via Localtunnel:
-# !curl -s ipv4.icanhazip.com   # Copy this public IP
-# !npx localtunnel --port 8501
-# (Submit the IP once on the loca.lt landing page to authorize static script chunk fetches)
+# Note for Localtunnel users:
+# If you are using localtunnel (!npx localtunnel --port 8501), you MUST fetch your container IP:
+# !curl -s ipv4.icanhazip.com
+# Enter this IP into the loca.lt reminder page, then hard-refresh (Ctrl+Shift+R) in your browser.
 ```
 
 ---

@@ -7,18 +7,20 @@ Interactive web dashboard that accepts photos or traffic videos and displays:
   2. Enhanced Plate (Deep Restored & Super-Resolved Plate)
   3. Final OCR Value (Autonomous OCR Transcription)
 
-Strictly displays only the core visual components and final recognized plate
-values without extraneous technical evaluation metrics.
+Uses native Streamlit components and session state management to guarantee
+seamless execution across local environments, Google Colab, and Kaggle.
 """
 
 import os
+import sys
 import tempfile
 from pathlib import Path
+from typing import Optional, List, Dict, Any
+
 import cv2
 import numpy as np
 import torch
 import streamlit as st
-from PIL import Image
 
 # Import pipeline components
 from scripts.pipeline import MainImagePipeline
@@ -26,7 +28,7 @@ from scripts.video_pipeline import ForensicVideoPipeline, DEFAULT_VEHICLE_MODEL
 
 
 # =========================================================================
-# Streamlit App Configuration & Styling
+# Streamlit App Configuration
 # =========================================================================
 st.set_page_config(
     page_title="Forensic License Plate OCR",
@@ -35,51 +37,17 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1e293b;
-        margin-bottom: 0.5rem;
-    }
-    .sub-header {
-        font-size: 1.1rem;
-        color: #64748b;
-        margin-bottom: 1.5rem;
-    }
-    .plate-badge {
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border: 2px solid #3b82f6;
-        border-radius: 8px;
-        padding: 18px 24px;
-        text-align: center;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-    }
-    .plate-text {
-        font-family: 'Consolas', 'Courier New', monospace;
-        font-size: 2rem;
-        font-weight: 800;
-        letter-spacing: 5px;
-        color: #f8fafc;
-        margin: 0;
-    }
-    .plate-sub {
-        font-size: 0.85rem;
-        color: #94a3b8;
-        margin-top: 6px;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
-    .card-box {
-        background-color: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        padding: 16px;
-        margin-bottom: 20px;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Initialize Session State
+if "photo_img_bgr" not in st.session_state:
+    st.session_state["photo_img_bgr"] = None
+if "photo_img_name" not in st.session_state:
+    st.session_state["photo_img_name"] = None
+if "photo_results" not in st.session_state:
+    st.session_state["photo_results"] = None
+if "video_source_path" not in st.session_state:
+    st.session_state["video_source_path"] = None
+if "video_results" not in st.session_state:
+    st.session_state["video_results"] = None
 
 
 # =========================================================================
@@ -101,106 +69,174 @@ def load_video_pipeline():
 
 
 # =========================================================================
+# Helper Functions for File Discovery
+# =========================================================================
+def find_available_sample_images() -> List[str]:
+    """Finds all available sample vehicle images on disk."""
+    candidates = []
+    search_dirs = [
+        "data/dataset_prepared/images",
+        "data/images",
+        "../data/dataset_prepared/images",
+        "../data/images"
+    ]
+    for sdir in search_dirs:
+        p = Path(sdir)
+        if p.is_dir():
+            for f in sorted(p.glob("*.jpg")) + sorted(p.glob("*.png")):
+                candidates.append(str(f))
+    return candidates
+
+
+def find_available_sample_videos() -> List[str]:
+    """Finds all available traffic video clips on disk."""
+    candidates = []
+    search_dirs = [
+        "data/videos",
+        "../data/videos"
+    ]
+    for sdir in search_dirs:
+        p = Path(sdir)
+        if p.is_dir():
+            for f in sorted(p.glob("*.mp4")) + sorted(p.glob("*.avi")):
+                candidates.append(str(f))
+    return candidates
+
+
+# =========================================================================
 # Sidebar
 # =========================================================================
-st.sidebar.title("⚙️ Configuration")
-mode = st.sidebar.selectbox(
-    "Select Processing Mode",
-    ["📷 Photo / Image", "🎥 Video (Traffic Footage)"],
-    index=0
-)
+with st.sidebar:
+    st.title("🚗 Forensic ANPR")
 
-# Hardware info
-num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-if num_gpus > 0:
-    gpu_name = torch.cuda.get_device_name(0)
-    st.sidebar.success(f"⚡ Hardware Acceleration: {gpu_name} ({num_gpus} GPU{'s' if num_gpus > 1 else ''})")
-else:
-    st.sidebar.info("💻 Hardware Acceleration: CPU Mode")
+    # Hardware Info
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if num_gpus > 0:
+        gpu_name = torch.cuda.get_device_name(0)
+        st.success(f"⚡ Hardware: {gpu_name} ({num_gpus} GPU{'s' if num_gpus > 1 else ''})")
+    else:
+        st.info("💻 Hardware: CPU Mode")
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("""
-### 📋 About This App
-This application performs autonomous vehicle license plate recognition:
-- **Detection**: Dedicated YOLOv8 plate localization
-- **Restoration**: Learned scene motion deblurring & geometric rectification
-- **Super-Resolution**: Standalone Real-ESRGAN x4
-- **OCR**: Dual-path character recognition
-""")
+    st.markdown("---")
+    st.markdown("""
+    ### 🔬 Pipeline Modules
+    - **Detection**: Autonomous YOLOv8 plate localization
+    - **Restoration**: Learned scene motion deblurring (NAFNet FP32)
+    - **Geometry**: Multi-factor ranked homography deskewing
+    - **Super-Resolution**: Standalone Real-ESRGAN x4
+    - **OCR**: Dual-path character recognition
+    """)
+
+    st.markdown("---")
+    st.markdown("""
+    ### 🌐 Running Remotely?
+    If running on **Kaggle** or **Colab**:
+    - **Cloudflare Tunnel (Recommended)**: Zero setup, no passwords or dynamic module chunk errors:
+      `./cloudflared tunnel --url http://localhost:8501`
+    - **Localtunnel (`loca.lt`)**: Requires submitting your container public IP (`curl -s ipv4.icanhazip.com`) once on the reminder page, then hard-refreshing (`Ctrl+Shift+R`).
+    """)
 
 
 # =========================================================================
-# PHOTO / IMAGE MODE
+# Main Content Tabs
 # =========================================================================
-if mode == "📷 Photo / Image":
-    st.markdown("<div class='main-header'>📷 Photo License Plate Recognition</div>", unsafe_allow_html=True)
-    st.markdown("<div class='sub-header'>Upload a vehicle image to extract, restore, and read the license plate.</div>", unsafe_allow_html=True)
+st.title("🚗 Autonomous Forensic License Plate Recognition")
+st.caption("Deep restoration, super-resolution, and automated alphanumeric transcription for vehicles and traffic surveillance.")
 
-    col_up, col_demo = st.columns([3, 1])
-    with col_up:
-        uploaded_image = st.file_uploader(
-            "Choose an image file",
-            type=["jpg", "jpeg", "png", "bmp"],
-            help="Supported formats: JPEG, PNG, BMP"
+tab_photo, tab_video = st.tabs(["📷 Photo License Plate", "🎥 Traffic Video (ANPR)"])
+
+
+# =========================================================================
+# TAB 1: PHOTO / IMAGE MODE
+# =========================================================================
+with tab_photo:
+    st.header("📷 Single-Image Plate Recognition")
+    st.markdown("Select a sample image from the benchmark dataset or upload your own vehicle photograph.")
+
+    sample_images = find_available_sample_images()
+    sample_options = ["-- Upload Custom Image --"] + [Path(s).name for s in sample_images]
+
+    col_input1, col_input2 = st.columns([2, 1])
+
+    with col_input1:
+        selected_sample = st.selectbox(
+            "Select Sample Image",
+            options=sample_options,
+            index=1 if len(sample_options) > 1 else 0,
+            help="Choose an existing benchmark sample or select 'Upload Custom Image'"
         )
-    with col_demo:
+
+        uploaded_image = None
+        if selected_sample == "-- Upload Custom Image --":
+            uploaded_image = st.file_uploader(
+                "Upload a vehicle photograph",
+                type=["jpg", "jpeg", "png", "bmp"],
+                help="Supported formats: JPEG, PNG, BMP"
+            )
+
+    with col_input2:
         st.write("&nbsp;")
-        use_demo_image = st.button("🧪 Use Sample Demo Image", use_container_width=True)
+        custom_path_input = st.text_input(
+            "Or enter local image path:",
+            placeholder="data/dataset_prepared/images/AN1.jpg"
+        )
+        if custom_path_input and os.path.isfile(custom_path_input):
+            loaded = cv2.imread(custom_path_input)
+            if loaded is not None:
+                st.session_state["photo_img_bgr"] = loaded
+                st.session_state["photo_img_name"] = Path(custom_path_input).name
+                st.session_state["photo_results"] = None
 
-    # Determine input image
-    input_bgr = None
-    input_filename = "Sample"
-
-    demo_path = None
-    default_candidates = [
-        "data/dataset_prepared/images/AN1.jpg",
-        "data/dataset_prepared/images/AR13.jpg",
-        "data/dataset_prepared/images/AN2.jpg"
-    ]
-    for cand in default_candidates:
-        if os.path.exists(cand):
-            demo_path = cand
-            break
-
-    if demo_path is None:
-        search_dirs = ["data/dataset_prepared/images", "data/images"]
-        for sdir in search_dirs:
-            if os.path.isdir(sdir):
-                cands = list(Path(sdir).glob("*.jpg")) + list(Path(sdir).glob("*.png"))
-                if cands:
-                    demo_path = str(cands[0])
-                    break
-
+    # Resolve active image
     if uploaded_image is not None:
         file_bytes = np.asarray(bytearray(uploaded_image.read()), dtype=np.uint8)
-        input_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-        input_filename = uploaded_image.name
-    elif use_demo_image:
-        if demo_path and os.path.exists(demo_path):
-            input_bgr = cv2.imread(demo_path)
-            input_filename = Path(demo_path).name
-        else:
-            st.warning("⚠️ No sample demo image found on disk. Please upload an image file.")
+        loaded = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        if loaded is not None:
+            st.session_state["photo_img_bgr"] = loaded
+            st.session_state["photo_img_name"] = uploaded_image.name
+            st.session_state["photo_results"] = None
+    elif selected_sample != "-- Upload Custom Image --":
+        matching_path = next((s for s in sample_images if Path(s).name == selected_sample), None)
+        if matching_path and os.path.isfile(matching_path):
+            if st.session_state["photo_img_name"] != selected_sample:
+                st.session_state["photo_img_bgr"] = cv2.imread(matching_path)
+                st.session_state["photo_img_name"] = selected_sample
+                st.session_state["photo_results"] = None
 
-    if input_bgr is not None:
+    # Display image preview and execution button
+    active_bgr = st.session_state.get("photo_img_bgr")
+    active_name = st.session_state.get("photo_img_name", "None")
+
+    if active_bgr is not None and getattr(active_bgr, "size", 0) > 0:
         st.markdown("---")
-        # Display full uploaded image
-        col_img, col_info = st.columns([2, 1])
-        with col_img:
-            st.image(cv2.cvtColor(input_bgr, cv2.COLOR_BGR2RGB), caption=f"Uploaded Scene: {input_filename}", use_container_width=True)
-        with col_info:
-            st.info("Click the button below to execute the full forensic super-resolution and OCR pipeline on this image.")
-            run_btn = st.button("🚀 Process License Plate", type="primary", use_container_width=True)
+        col_preview, col_action = st.columns([2, 1])
 
-        if run_btn:
-            with st.spinner("Processing image through forensic pipeline..."):
+        with col_preview:
+            st.image(
+                cv2.cvtColor(active_bgr, cv2.COLOR_BGR2RGB),
+                caption=f"Input Scene: {active_name} ({active_bgr.shape[1]}x{active_bgr.shape[0]} px)",
+                use_container_width=True
+            )
+
+        with col_action:
+            st.info("Execute full forensic deblurring, perspective rectification, Real-ESRGAN super-resolution, and OCR.")
+            run_photo_btn = st.button("🚀 Process License Plate", type="primary", use_container_width=True)
+
+        if run_photo_btn:
+            with st.spinner("Executing forensic pipeline stages..."):
                 pipeline = load_pipeline()
-                res = pipeline.run(input_bgr=input_bgr, track_latency=False)
+                res = pipeline.run(input_bgr=active_bgr, track_latency=False)
+                st.session_state["photo_results"] = res
+
+        # Display results from session state
+        res = st.session_state.get("photo_results")
+        if res is not None:
+            st.markdown("---")
+            st.subheader("🔍 Recognition Results")
 
             vis = res.get("vis")
             final_text = res.get("final_text", "NOT_DETECTED")
-
-            st.markdown("### 🔍 Forensic Recognition Results")
+            final_conf = res.get("final_conf", 0.0)
 
             if vis is not None and res.get("detection_bbox") is not None:
                 raw_crop = vis.get("raw_crop")
@@ -210,94 +246,106 @@ if mode == "📷 Photo / Image":
                 elif vis.get("rectified_crop") is not None and getattr(vis.get("rectified_crop"), "size", 0) > 0:
                     enhanced_crop = vis.get("rectified_crop")
 
-                # 3-Column Display: Extracted Plate | Enhanced Plate | Final OCR Value
                 c1, c2, c3 = st.columns([1, 1, 1.4])
 
                 with c1:
-                    st.markdown("#### 1. Extracted Plate")
+                    st.caption("🔍 **1. Extracted Plate (Raw ROI)**")
                     if raw_crop is not None and getattr(raw_crop, "size", 0) > 0:
                         st.image(cv2.cvtColor(raw_crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                     else:
                         st.warning("Extracted crop unavailable")
 
                 with c2:
-                    st.markdown("#### 2. Enhanced Plate")
+                    st.caption("✨ **2. Enhanced Plate (Restored + SR)**")
                     if enhanced_crop is not None and getattr(enhanced_crop, "size", 0) > 0:
                         st.image(cv2.cvtColor(enhanced_crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                     else:
                         st.warning("Enhanced crop unavailable")
 
                 with c3:
-                    st.markdown("#### 3. Final OCR Value")
-                    st.markdown(f"""
-                    <div class='plate-badge'>
-                        <p class='plate-text'>{final_text}</p>
-                        <p class='plate-sub'>Verified License Plate</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-
+                    st.caption("🔤 **3. Final OCR Transcription**")
+                    st.success(f"### `{final_text}`")
+                    st.metric(label="Recognition Confidence", value=f"{final_conf * 100:.1f}%")
             else:
-                st.error("No license plate could be localized in this image.")
+                st.error("No vehicle license plate could be detected in this image.")
 
 
 # =========================================================================
-# VIDEO MODE
+# TAB 2: VIDEO MODE (TRAFFIC FOOTAGE ANPR)
 # =========================================================================
-elif mode == "🎥 Video (Traffic Footage)":
-    st.markdown("<div class='main-header'>🎥 Video License Plate Recognition (ANPR)</div>", unsafe_allow_html=True)
-    st.markdown("<div class='sub-header'>Upload traffic footage to track vehicles, filter no-plate false positives, and recognize license plates.</div>", unsafe_allow_html=True)
+with tab_video:
+    st.header("🎥 Traffic Video Recognition (ANPR)")
+    st.markdown("Track multiple moving vehicles, filter false-positives, extract clearest observations, and recognize license plates.")
 
-    col_up, col_demo = st.columns([3, 1])
-    with col_up:
-        uploaded_video = st.file_uploader(
-            "Choose a video file",
-            type=["mp4", "avi", "mov", "mkv"],
-            help="Supported formats: MP4, AVI, MOV"
+    sample_videos = find_available_sample_videos()
+    sample_vid_options = ["-- Upload Custom Video --"] + [Path(s).name for s in sample_videos]
+
+    col_vid1, col_vid2 = st.columns([2, 1])
+
+    with col_vid1:
+        selected_vid = st.selectbox(
+            "Select Sample Video",
+            options=sample_vid_options,
+            index=1 if len(sample_vid_options) > 1 else 0,
+            help="Choose an existing traffic sample or select 'Upload Custom Video'"
         )
-    with col_demo:
+
+        uploaded_vid = None
+        if selected_vid == "-- Upload Custom Video --":
+            uploaded_vid = st.file_uploader(
+                "Upload traffic footage",
+                type=["mp4", "avi", "mov", "mkv"],
+                help="Supported formats: MP4, AVI, MOV"
+            )
+
+    with col_vid2:
         st.write("&nbsp;")
-        use_demo_video = st.button("🧪 Use Sample Traffic Video", use_container_width=True)
+        custom_vid_input = st.text_input(
+            "Or enter local video path:",
+            placeholder="data/videos/traffic_sample.mp4"
+        )
+        if custom_vid_input and os.path.isfile(custom_vid_input):
+            st.session_state["video_source_path"] = custom_vid_input
+            st.session_state["video_results"] = None
 
     col_opt1, col_opt2 = st.columns([1, 2])
     with col_opt1:
-        process_all = st.checkbox("Analyze Full Video (No Limit)", value=False,
-                                  help="Process every frame from start to finish. Useful for complete ANPR on shorter clips.")
+        process_all = st.checkbox(
+            "Analyze Full Video (No Limit)",
+            value=False,
+            help="Process all video frames from start to finish."
+        )
     with col_opt2:
         if not process_all:
             max_frames_slider = st.slider(
-                "Max Frames to Analyze", min_value=50, max_value=1200, value=250, step=50,
-                help="Limits analysis to the first N frames for quick feedback (e.g. 250 frames ≈ 8-10s of traffic footage)."
+                "Max Frames to Analyze",
+                min_value=50, max_value=1200, value=250, step=50,
+                help="Limits analysis to the first N frames for rapid processing (e.g. 250 frames ≈ 8-10s)."
             )
         else:
             max_frames_slider = None
-            st.caption("⚡ **Full Video Mode:** The pipeline will process all frames until the video terminates.")
+            st.caption("⚡ **Full Video Mode:** The pipeline will process every frame until the video terminates.")
 
-    video_source_path = None
-    demo_video_path = None
-    default_vid = "data/videos/Automatic Number Plate Recognition (ANPR) _ Vehicle Number Plate Recognition (1).mp4"
-    if os.path.exists(default_vid):
-        demo_video_path = default_vid
-    elif os.path.isdir("data/videos"):
-        cands = list(Path("data/videos").glob("*.mp4")) + list(Path("data/videos").glob("*.avi"))
-        if cands:
-            demo_video_path = str(cands[0])
-
-    if uploaded_video is not None:
+    # Resolve active video
+    if uploaded_vid is not None:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-        tfile.write(uploaded_video.read())
+        tfile.write(uploaded_vid.read())
         tfile.flush()
         tfile.close()
-        video_source_path = tfile.name
-    elif use_demo_video:
-        if demo_video_path and os.path.exists(demo_video_path):
-            video_source_path = demo_video_path
-        else:
-            st.warning("⚠️ No sample demo video found on disk. Please upload a video file.")
+        st.session_state["video_source_path"] = tfile.name
+        st.session_state["video_results"] = None
+    elif selected_vid != "-- Upload Custom Video --":
+        matching_vid = next((s for s in sample_videos if Path(s).name == selected_vid), None)
+        if matching_vid and os.path.isfile(matching_vid):
+            if st.session_state["video_source_path"] != matching_vid:
+                st.session_state["video_source_path"] = matching_vid
+                st.session_state["video_results"] = None
 
-    if video_source_path is not None:
+    active_vid = st.session_state.get("video_source_path")
+    if active_vid and os.path.isfile(active_vid):
         st.markdown("---")
         frame_limit_desc = "Entire Video" if max_frames_slider is None else f"First {max_frames_slider} frames"
-        st.info(f"Target Video: `{os.path.basename(video_source_path)}` | Scope: `{frame_limit_desc}`")
+        st.info(f"Target Video: `{Path(active_vid).name}` | Scope: `{frame_limit_desc}`")
 
         run_vid_btn = st.button("🚀 Process Traffic Video", type="primary", use_container_width=True)
 
@@ -305,15 +353,20 @@ elif mode == "🎥 Video (Traffic Footage)":
             with st.spinner("Tracking vehicles, extracting plates, and running forensic OCR..."):
                 video_pipe = load_video_pipeline()
                 verified_cars = video_pipe.process_video(
-                    video_path=video_source_path,
+                    video_path=active_vid,
                     output_dir="results/video_anpr",
                     vehicle_model_name=DEFAULT_VEHICLE_MODEL,
                     max_frames=max_frames_slider,
                     save_visual_summary=True,
                     show_summary=False
                 )
+                st.session_state["video_results"] = verified_cars
 
-            st.markdown(f"### 🚗 Verified Vehicles ({len(verified_cars)} Confirmed)")
+        # Display video results from session state
+        verified_cars = st.session_state.get("video_results")
+        if verified_cars is not None:
+            st.markdown("---")
+            st.subheader(f"🚗 Verified Vehicles ({len(verified_cars)} Confirmed)")
 
             if verified_cars:
                 for idx, car in enumerate(verified_cars, 1):
@@ -330,7 +383,6 @@ elif mode == "🎥 Video (Traffic Footage)":
                         elif vis.get("rectified_crop") is not None and getattr(vis.get("rectified_crop"), "size", 0) > 0:
                             enhanced_crop = vis.get("rectified_crop")
 
-                    # Fallback to vehicle crop if plate crop is missing
                     if raw_crop is None or getattr(raw_crop, "size", 0) == 0:
                         raw_crop = car.get("car_img")
                     if enhanced_crop is None or getattr(enhanced_crop, "size", 0) == 0:
@@ -351,36 +403,31 @@ elif mode == "🎥 Video (Traffic Footage)":
                         c_car, c_plate, c_enh, c_ocr = st.columns([1.4, 1.0, 1.0, 1.4])
 
                         with c_car:
-                            st.caption("🚗 1. Extracted Vehicle")
+                            st.caption("🚗 **1. Extracted Vehicle**")
                             if car_disp is not None and getattr(car_disp, "size", 0) > 0:
                                 st.image(cv2.cvtColor(car_disp, cv2.COLOR_BGR2RGB), use_container_width=True)
                             else:
                                 st.warning("Vehicle image unavailable")
 
                         with c_plate:
-                            st.caption("🔍 2. Extracted Plate")
+                            st.caption("🔍 **2. Extracted Plate**")
                             if raw_crop is not None and getattr(raw_crop, "size", 0) > 0:
                                 st.image(cv2.cvtColor(raw_crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                             else:
                                 st.warning("Extracted crop unavailable")
 
                         with c_enh:
-                            st.caption("✨ 3. Enhanced Plate")
+                            st.caption("✨ **3. Enhanced Plate**")
                             if enhanced_crop is not None and getattr(enhanced_crop, "size", 0) > 0:
                                 st.image(cv2.cvtColor(enhanced_crop, cv2.COLOR_BGR2RGB), use_container_width=True)
                             else:
                                 st.warning("Enhanced crop unavailable")
 
                         with c_ocr:
-                            st.caption("🔤 4. Final OCR Value")
-                            st.markdown(f"""
-                            <div class='plate-badge'>
-                                <p class='plate-text'>{ocr_val}</p>
-                                <p class='plate-sub'>Verified Vehicle License Plate</p>
-                            </div>
-                            """, unsafe_allow_html=True)
+                            st.caption("🔤 **4. Final OCR Value**")
+                            st.success(f"### `{ocr_val}`")
+                            st.caption("Verified Vehicle License Plate")
 
-                        st.markdown("<hr style='margin: 12px 0;'>", unsafe_allow_html=True)
+                        st.markdown("---")
             else:
                 st.warning("No readable license plates were detected in the processed video frames.")
-
